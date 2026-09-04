@@ -267,10 +267,20 @@ if not API_KEY:
 tab_analyser, tab_historique = st.tabs(["📸 Analyser", "📊 Historique"])
 
 with tab_analyser:
-    uploaded_file = st.file_uploader("Photo du repas", type=["jpg", "jpeg", "png", "webp"])
+    source = st.radio(
+        "Comment veux-tu fournir la photo ?",
+        ["📷 Prendre une photo", "🖼️ Choisir depuis la galerie"],
+        horizontal=True,
+    )
+
+    if source == "📷 Prendre une photo":
+        uploaded_file = st.camera_input("Photo du repas")
+    else:
+        uploaded_file = st.file_uploader("Photo du repas", type=["jpg", "jpeg", "png", "webp"])
 
     if uploaded_file is not None:
-        st.image(uploaded_file, caption="Photo envoyée", use_container_width=True)
+        if source != "📷 Prendre une photo":
+            st.image(uploaded_file, caption="Photo envoyée", use_container_width=True)
 
         if st.button("Analyser mon repas", type="primary", disabled=not API_KEY):
             with st.spinner(f"Analyse en cours ({MODEL})..."):
