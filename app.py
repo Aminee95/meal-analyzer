@@ -1,19 +1,18 @@
 """
-Analyseur de repas par photo — v2
+Analyseur de repas par photo — v3
 ------------------------------------
-Upload une photo d'assiette -> l'IA identifie les aliments -> estimation
-calories / macros -> historique + objectif journalier.
-
-Optimisations perf :
-- image redimensionnée + compressée avant envoi (upload + analyse plus rapides)
-- modèle rapide (gpt-4o-mini) par défaut, gpt-4o en option pour plus de précision
+Upload/scan une photo d'assiette -> l'IA identifie les aliments -> macros
+détaillées -> suivi journalier complet (calories + protéines + glucides + lipides)
+-> historique éditable + export CSV.
 """
 
 import base64
+import csv
 import io
 import json
 import os
 import sqlite3
+import time
 from datetime import date, datetime
 
 import streamlit as st
@@ -29,8 +28,12 @@ st.set_page_config(page_title="Analyseur de repas", page_icon="🍽️", layout=
 API_KEY = st.secrets.get("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
 
 DB_PATH = "meals.db"
-MAX_IMAGE_DIMENSION = 800  # px — réduit fortement le temps d'upload/analyse
+MAX_IMAGE_DIMENSION = 800
 JPEG_QUALITY = 80
+MAX_UPLOAD_MB = 10
+MAX_RETRIES = 2
+
+MEAL_TYPES = ["🌅 Petit-déjeuner", "☀️ Déjeuner", "🌙 Dîner", "🍎 Collation"]
 
 PROMPT = """Tu es un nutritionniste expert. Analyse cette photo de repas et identifie
 chaque aliment visible avec une estimation de sa portion.
@@ -66,7 +69,7 @@ un seul élément."""
 
 
 # ----------------------------------------------------------------------
-# Base de données (historique + objectif)
+# Base de données
 # ----------------------------------------------------------------------
 
 def get_connection():
@@ -79,26 +82,25 @@ def init_db():
             """CREATE TABLE IF NOT EXISTS meals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL,
+                meal_type TEXT DEFAULT '',
                 aliments_json TEXT NOT NULL,
                 calories REAL, proteines_g REAL, glucides_g REAL, lipides_g REAL
             )"""
         )
         conn.execute(
-            """CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )"""
+            "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"
         )
 
 
-def save_meal(result: dict):
+def save_meal(result: dict, meal_type: str):
     total = result.get("total", {})
     with get_connection() as conn:
         conn.execute(
-            "INSERT INTO meals (timestamp, aliments_json, calories, proteines_g, glucides_g, lipides_g) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO meals (timestamp, meal_type, aliments_json, calories, proteines_g, glucides_g, lipides_g) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 datetime.now().isoformat(),
+                meal_type,
                 json.dumps(result.get("aliments", []), ensure_ascii=False),
                 total.get("calories", 0),
                 total.get("proteines_g", 0),
@@ -108,7 +110,12 @@ def save_meal(result: dict):
         )
 
 
-def get_meals(limit: int = 100):
+def delete_meal(meal_id: int):
+    with get_connection() as conn:
+        conn.execute("DELETE FROM meals WHERE id = ?", (meal_id,))
+
+
+def get_meals(limit: int = 200):
     with get_connection() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
@@ -117,13 +124,21 @@ def get_meals(limit: int = 100):
     return [dict(r) for r in rows]
 
 
-def get_today_total() -> float:
+def get_today_totals() -> dict:
     today_str = date.today().isoformat()
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT SUM(calories) FROM meals WHERE timestamp LIKE ?", (f"{today_str}%",)
+            "SELECT SUM(calories), SUM(proteines_g), SUM(glucides_g), SUM(lipides_g) "
+            "FROM meals WHERE timestamp LIKE ?",
+            (f"{today_str}%",),
         ).fetchone()
-    return row[0] or 0.0
+    cal, prot, gluc, lip = row
+    return {
+        "calories": cal or 0.0,
+        "proteines_g": prot or 0.0,
+        "glucides_g": gluc or 0.0,
+        "lipides_g": lip or 0.0,
+    }
 
 
 def get_setting(key: str, default: str = "") -> str:
@@ -145,20 +160,15 @@ init_db()
 
 
 # ----------------------------------------------------------------------
-# Traitement image + appel API
+# Image + appel API (avec réessai automatique)
 # ----------------------------------------------------------------------
 
 def compress_image(uploaded_file) -> tuple[str, str]:
-    """Redimensionne et compresse l'image en JPEG avant envoi.
-    Réduit fortement le poids envoyé -> analyse plus rapide et moins chère."""
     img = Image.open(uploaded_file).convert("RGB")
-
     img.thumbnail((MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION))
-
     buffer = io.BytesIO()
     img.save(buffer, format="JPEG", quality=JPEG_QUALITY, optimize=True)
     b64 = base64.standard_b64encode(buffer.getvalue()).decode("utf-8")
-
     return b64, "image/jpeg"
 
 
@@ -167,29 +177,55 @@ def analyze_meal(uploaded_file, api_key: str, model: str) -> dict:
     b64_image, media_type = compress_image(uploaded_file)
     data_url = f"data:{media_type};base64,{b64_image}"
 
-    response = client.chat.completions.create(
-        model=model,
-        max_tokens=1500,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                    {"type": "text", "text": PROMPT},
+    last_error = None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                max_tokens=1500,
+                timeout=30,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                            {"type": "text", "text": PROMPT},
+                        ],
+                    }
                 ],
-            }
-        ],
-    )
+            )
+            raw_text = response.choices[0].message.content.strip()
+            if raw_text.startswith("```"):
+                raw_text = raw_text.strip("`")
+                if raw_text.startswith("json"):
+                    raw_text = raw_text[4:]
+                raw_text = raw_text.strip()
+            return json.loads(raw_text)
+        except json.JSONDecodeError as e:
+            last_error = e
+            continue  # une reformulation de la même image peut aider
+        except Exception as e:
+            last_error = e
+            time.sleep(1)
+            continue
 
-    raw_text = response.choices[0].message.content.strip()
+    raise RuntimeError(f"Échec après {MAX_RETRIES + 1} tentatives : {last_error}")
 
-    if raw_text.startswith("```"):
-        raw_text = raw_text.strip("`")
-        if raw_text.startswith("json"):
-            raw_text = raw_text[4:]
-        raw_text = raw_text.strip()
 
-    return json.loads(raw_text)
+# ----------------------------------------------------------------------
+# Aide visuelle : couleur selon proximité de l'objectif
+# ----------------------------------------------------------------------
+
+def macro_bar(label: str, value: float, goal: float, unit: str = "g"):
+    ratio = min(value / goal, 1.2) if goal else 0
+    if ratio < 0.5:
+        color = "🔵"
+    elif ratio <= 1.05:
+        color = "🟢"
+    else:
+        color = "🟠"
+    st.write(f"{color} **{label}** — {value:.0f} / {goal:.0f} {unit}")
+    st.progress(min(ratio, 1.0))
 
 
 def display_result(result: dict):
@@ -198,7 +234,7 @@ def display_result(result: dict):
     note = result.get("note", "")
 
     st.divider()
-    st.subheader("Résumé nutritionnel")
+    st.subheader("Résumé du repas")
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Calories", f"{total.get('calories', 0):.0f} kcal")
@@ -222,63 +258,60 @@ def display_result(result: dict):
 
 
 # ----------------------------------------------------------------------
-# Interface — barre latérale (objectif + réglages perf)
+# Barre latérale — objectifs + réglages
 # ----------------------------------------------------------------------
 
-st.sidebar.header("🎯 Objectif journalier")
-current_goal = get_setting("daily_goal", "2000")
-new_goal = st.sidebar.number_input(
-    "Objectif calorique (kcal)", min_value=500, max_value=6000,
-    value=int(current_goal), step=50,
-)
-if str(new_goal) != current_goal:
-    set_setting("daily_goal", str(new_goal))
+st.sidebar.header("🎯 Objectifs journaliers")
+cal_goal = st.sidebar.number_input("Calories (kcal)", 500, 6000, int(get_setting("goal_cal", "2000")), 50)
+prot_goal = st.sidebar.number_input("Protéines (g)", 20, 400, int(get_setting("goal_prot", "100")), 5)
+gluc_goal = st.sidebar.number_input("Glucides (g)", 20, 600, int(get_setting("goal_gluc", "250")), 10)
+lip_goal = st.sidebar.number_input("Lipides (g)", 10, 250, int(get_setting("goal_lip", "70")), 5)
+
+for key, val in [("goal_cal", cal_goal), ("goal_prot", prot_goal), ("goal_gluc", gluc_goal), ("goal_lip", lip_goal)]:
+    if str(val) != get_setting(key):
+        set_setting(key, str(val))
 
 st.sidebar.divider()
 st.sidebar.header("⚡ Performance")
 fast_mode = st.sidebar.toggle("Mode rapide (gpt-4o-mini)", value=True)
-st.sidebar.caption(
-    "Le mode rapide analyse en ~2x moins de temps et coûte moins cher. "
-    "Désactive-le si tu veux une estimation plus précise sur des plats complexes."
-)
+st.sidebar.caption("Plus rapide et moins cher. Désactive pour plus de précision sur des plats complexes.")
 MODEL = "gpt-4o-mini" if fast_mode else "gpt-4o"
 
-today_total = get_today_total()
-progress_ratio = min(today_total / new_goal, 1.0) if new_goal else 0
 st.sidebar.divider()
-st.sidebar.subheader("Aujourd'hui")
-st.sidebar.progress(progress_ratio)
-st.sidebar.caption(f"{today_total:.0f} / {new_goal} kcal")
+st.sidebar.subheader("📅 Aujourd'hui")
+today = get_today_totals()
+macro_bar("Calories", today["calories"], cal_goal, "kcal")
+macro_bar("Protéines", today["proteines_g"], prot_goal)
+macro_bar("Glucides", today["glucides_g"], gluc_goal)
+macro_bar("Lipides", today["lipides_g"], lip_goal)
 
 
 # ----------------------------------------------------------------------
-# Interface — contenu principal
+# Contenu principal
 # ----------------------------------------------------------------------
 
 st.title("🍽️ Analyseur de repas")
 st.caption("Prends une photo de ton assiette, l'IA fait le reste.")
 
 if not API_KEY:
-    st.warning(
-        "Aucune clé API trouvée. Ajoute OPENAI_API_KEY dans les secrets Streamlit "
-        "ou en variable d'environnement pour utiliser l'application."
-    )
+    st.warning("Aucune clé API trouvée. Ajoute OPENAI_API_KEY dans les secrets Streamlit.")
 
 tab_analyser, tab_historique = st.tabs(["📸 Analyser", "📊 Historique"])
 
 with tab_analyser:
-    source = st.radio(
-        "Comment veux-tu fournir la photo ?",
-        ["📷 Prendre une photo", "🖼️ Choisir depuis la galerie"],
-        horizontal=True,
+    meal_type = st.selectbox("Type de repas", MEAL_TYPES)
+
+    source = st.radio("Photo", ["📷 Prendre une photo", "🖼️ Depuis la galerie"], horizontal=True)
+    uploaded_file = (
+        st.camera_input("Photo du repas") if source == "📷 Prendre une photo"
+        else st.file_uploader("Photo du repas", type=["jpg", "jpeg", "png", "webp"])
     )
 
-    if source == "📷 Prendre une photo":
-        uploaded_file = st.camera_input("Photo du repas")
-    else:
-        uploaded_file = st.file_uploader("Photo du repas", type=["jpg", "jpeg", "png", "webp"])
-
     if uploaded_file is not None:
+        if uploaded_file.size > MAX_UPLOAD_MB * 1024 * 1024:
+            st.error(f"Image trop lourde (max {MAX_UPLOAD_MB} Mo). Choisis une photo plus légère.")
+            st.stop()
+
         if source != "📷 Prendre une photo":
             st.image(uploaded_file, caption="Photo envoyée", use_container_width=True)
 
@@ -286,30 +319,32 @@ with tab_analyser:
             with st.spinner(f"Analyse en cours ({MODEL})..."):
                 try:
                     result = analyze_meal(uploaded_file, API_KEY, MODEL)
-                except json.JSONDecodeError:
-                    st.error("Le modèle n'a pas renvoyé un JSON valide. Réessaie avec une autre photo.")
-                    st.stop()
-                except Exception as e:
-                    st.error(f"Erreur pendant l'analyse : {e}")
+                except RuntimeError as e:
+                    st.error(f"L'analyse a échoué après plusieurs tentatives : {e}")
                     st.stop()
 
-            save_meal(result)
-            display_result(result)
-
-            st.divider()
-            st.caption(
-                "⚠️ Ces valeurs sont des estimations basées sur une analyse visuelle et peuvent "
-                "s'écarter de la réalité. Ne pas utiliser comme seule base pour un suivi médical."
-            )
+            save_meal(result, meal_type)
+            st.session_state["last_result"] = result
             st.rerun()
     else:
-        st.info("Uploade une photo pour commencer.")
+        st.info("Prends ou choisis une photo pour commencer.")
+
+    if "last_result" in st.session_state:
+        display_result(st.session_state["last_result"])
+        st.divider()
+        st.caption(
+            "⚠️ Estimations basées sur une analyse visuelle, à titre indicatif. "
+            "Ne pas utiliser comme seule base pour un suivi médical."
+        )
+        if st.button("Effacer ce résultat"):
+            del st.session_state["last_result"]
+            st.rerun()
 
 with tab_historique:
     meals = get_meals()
 
     if not meals:
-        st.info("Aucun repas analysé pour le moment. Va dans l'onglet Analyser pour commencer.")
+        st.info("Aucun repas analysé pour le moment.")
     else:
         chart_data = {}
         for m in meals:
@@ -319,10 +354,25 @@ with tab_historique:
         st.subheader("Calories par jour")
         st.bar_chart(dict(sorted(chart_data.items())))
 
+        csv_buffer = io.StringIO()
+        writer = csv.writer(csv_buffer)
+        writer.writerow(["Date", "Type de repas", "Calories", "Protéines (g)", "Glucides (g)", "Lipides (g)"])
+        for m in meals:
+            writer.writerow([m["timestamp"], m["meal_type"], m["calories"], m["proteines_g"], m["glucides_g"], m["lipides_g"]])
+        st.download_button("⬇️ Exporter en CSV", csv_buffer.getvalue(), file_name="historique_repas.csv", mime="text/csv")
+
         st.subheader("Repas récents")
-        for m in meals[:20]:
+        for m in meals[:30]:
             ts = datetime.fromisoformat(m["timestamp"]).strftime("%d/%m %H:%M")
-            with st.expander(f"{ts} — {m['calories']:.0f} kcal"):
+            label = f"{m['meal_type']} — {ts} — {m['calories']:.0f} kcal"
+            with st.expander(label):
                 aliments = json.loads(m["aliments_json"])
                 for a in aliments:
-                    st.write(f"- {a.get('nom', '')} ({a.get('portion_g', 0):.0f} g) — {a.get('calories', 0):.0f} kcal")
+                    st.write(
+                        f"- {a.get('nom', '')} ({a.get('portion_g', 0):.0f} g) — "
+                        f"{a.get('calories', 0):.0f} kcal · P {a.get('proteines_g', 0):.0f}g · "
+                        f"G {a.get('glucides_g', 0):.0f}g · L {a.get('lipides_g', 0):.0f}g"
+                    )
+                if st.button("🗑️ Supprimer cette entrée", key=f"del_{m['id']}"):
+                    delete_meal(m["id"])
+                    st.rerun()
