@@ -82,7 +82,6 @@ def init_db():
             """CREATE TABLE IF NOT EXISTS meals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL,
-                meal_type TEXT DEFAULT '',
                 aliments_json TEXT NOT NULL,
                 calories REAL, proteines_g REAL, glucides_g REAL, lipides_g REAL
             )"""
@@ -90,6 +89,11 @@ def init_db():
         conn.execute(
             "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"
         )
+
+        # Migration automatique : ajoute meal_type si la base existait déjà sans cette colonne
+        existing_cols = [row[1] for row in conn.execute("PRAGMA table_info(meals)").fetchall()]
+        if "meal_type" not in existing_cols:
+            conn.execute("ALTER TABLE meals ADD COLUMN meal_type TEXT DEFAULT ''")
 
 
 def save_meal(result: dict, meal_type: str):
