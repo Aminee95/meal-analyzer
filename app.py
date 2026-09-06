@@ -55,14 +55,56 @@ h1, h2, h3 { font-family: 'Fraunces', serif !important; font-weight: 700 !import
 .macro-card {
     background: #FFFFFF; border: 1px solid #E7E1D6; border-radius: 12px;
     padding: 0.85rem 1rem; margin-bottom: 0.6rem;
+    box-shadow: 0 2px 8px rgba(31, 42, 36, 0.05);
 }
 .macro-label { font-size: 0.82rem; color: #6B6459; margin-bottom: 0.15rem; }
 .macro-value { font-family: 'Fraunces', serif; font-size: 1.55rem; font-weight: 700; }
 .bar-track { background: #EFEAE0; border-radius: 999px; height: 10px; width: 100%; overflow: hidden; margin-top: 0.35rem; }
 .bar-fill { height: 100%; border-radius: 999px; }
+
+.hero { display: flex; align-items: center; gap: 0.85rem; margin-bottom: 0.2rem; }
+.hero-mark {
+    width: 46px; height: 46px; border-radius: 13px; background: #E8543E;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    box-shadow: 0 4px 14px rgba(232, 84, 62, 0.28);
+}
+.hero-title { font-family: 'Fraunces', serif; font-weight: 700; font-size: 2rem; line-height: 1.1; margin: 0; color: #1F2A24; }
+.hero-tagline { color: #6B6459; font-size: 0.98rem; margin-top: 0.15rem; }
+
+.badge {
+    display: inline-flex; align-items: center; gap: 0.35rem; border-radius: 999px;
+    padding: 0.3rem 0.85rem; font-size: 0.82rem; font-weight: 600;
+}
+
+[data-testid="stExpander"] {
+    border: 1px solid #E7E1D6 !important; border-radius: 12px !important;
+    box-shadow: 0 2px 8px rgba(31, 42, 36, 0.04);
+}
+[data-testid="stExpander"] summary {
+    font-family: 'Fraunces', serif; font-weight: 600;
+}
+
+.stAlert, [data-testid="stNotification"] {
+    border-radius: 12px !important;
+}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+HERO_HTML = """
+<div class="hero">
+  <div class="hero-mark">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="12" cy="12" r="9" stroke="white" stroke-width="1.6"/>
+      <circle cx="12" cy="12" r="4.5" stroke="white" stroke-width="1.6"/>
+    </svg>
+  </div>
+  <div>
+    <p class="hero-title">Assiette</p>
+    <p class="hero-tagline">Photographie ton repas, connais tes macros à la seconde près.</p>
+  </div>
+</div>
+"""
 
 API_KEY = st.secrets.get("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
 
@@ -338,8 +380,13 @@ def display_result(result: dict):
     with col3: macro_row("Glucides", total.get("glucides_g", 0), "glucides_g")
     with col4: macro_row("Lipides", total.get("lipides_g", 0), "lipides_g")
 
-    confiance_emoji = {"haute": "🟢", "moyenne": "🟡", "basse": "🔴"}.get(confiance, "🟡")
-    st.caption(f"{confiance_emoji} Confiance de l'estimation : {confiance}")
+    confiance_colors = {"haute": "#4C7C59", "moyenne": "#E8A33D", "basse": "#E8543E"}
+    badge_color = confiance_colors.get(confiance, "#E8A33D")
+    st.markdown(
+        f"""<span class="badge" style="background:{badge_color}1A; color:{badge_color};">
+            ● Confiance {confiance}</span>""",
+        unsafe_allow_html=True,
+    )
     if note:
         st.info(note)
 
@@ -386,8 +433,7 @@ macro_bar("Lipides", today["lipides_g"], lip_goal, "lipides_g")
 # Contenu principal
 # ----------------------------------------------------------------------
 
-st.title("🍽️ Analyseur de repas")
-st.caption("Prends une photo de ton assiette, l'IA fait le reste.")
+st.markdown(HERO_HTML, unsafe_allow_html=True)
 
 if not API_KEY:
     st.warning("Aucune clé API trouvée. Ajoute OPENAI_API_KEY dans les secrets Streamlit.")
