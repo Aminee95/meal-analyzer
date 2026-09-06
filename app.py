@@ -8,6 +8,7 @@ détaillées -> suivi journalier complet (calories + protéines + glucides + lip
 
 import base64
 import csv
+import hashlib
 import io
 import json
 import os
@@ -65,7 +66,12 @@ balises markdown, au format exact suivant :
 Sois réaliste dans tes estimations de portions (regarde la taille de l'assiette
 et des couverts comme référence). Si un aliment est composé (ex: un sandwich),
 décompose-le en ingrédients principaux si c'est visible, sinon garde-le comme
-un seul élément."""
+un seul élément.
+
+Méthode à suivre pour rester cohérent : base-toi sur les valeurs nutritionnelles
+standards par 100g des aliments couramment admises (tables nutritionnelles
+usuelles), puis applique-les à ton estimation de portion en grammes. Ne varie
+pas ta méthode de calcul d'une analyse à l'autre pour un même type d'aliment."""
 
 
 # ----------------------------------------------------------------------
@@ -88,6 +94,13 @@ def init_db():
         )
         conn.execute(
             "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS analysis_cache (
+                image_hash TEXT PRIMARY KEY,
+                result_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )"""
         )
 
         # Migration automatique : ajoute meal_type si la base existait déjà sans cette colonne
@@ -160,6 +173,23 @@ def set_setting(key: str, value: str):
         )
 
 
+def get_cached_analysis(image_hash: str) -> dict | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT result_json FROM analysis_cache WHERE image_hash = ?", (image_hash,)
+        ).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def save_cached_analysis(image_hash: str, result: dict):
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO analysis_cache (image_hash, result_json, created_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(image_hash) DO UPDATE SET result_json = excluded.result_json",
+            (image_hash, json.dumps(result, ensure_ascii=False), datetime.now().isoformat()),
+        )
+
+
 init_db()
 
 
@@ -177,8 +207,16 @@ def compress_image(uploaded_file) -> tuple[str, str]:
 
 
 def analyze_meal(uploaded_file, api_key: str, model: str) -> dict:
-    client = OpenAI(api_key=api_key)
     b64_image, media_type = compress_image(uploaded_file)
+
+    # Si cette image exacte (après compression) a déjà été analysée, on renvoie
+    # le même résultat instantanément -> zéro variation, zéro coût, zéro attente.
+    image_hash = hashlib.sha256(b64_image.encode("utf-8")).hexdigest()
+    cached = get_cached_analysis(image_hash)
+    if cached is not None:
+        return cached
+
+    client = OpenAI(api_key=api_key)
     data_url = f"data:{media_type};base64,{b64_image}"
 
     last_error = None
@@ -188,6 +226,8 @@ def analyze_meal(uploaded_file, api_key: str, model: str) -> dict:
                 model=model,
                 max_tokens=1500,
                 timeout=30,
+                temperature=0,   # réponse la plus factuelle/reproductible possible
+                seed=42,         # demande au modèle de viser un résultat stable d'un appel à l'autre
                 messages=[
                     {
                         "role": "user",
@@ -204,7 +244,9 @@ def analyze_meal(uploaded_file, api_key: str, model: str) -> dict:
                 if raw_text.startswith("json"):
                     raw_text = raw_text[4:]
                 raw_text = raw_text.strip()
-            return json.loads(raw_text)
+            result = json.loads(raw_text)
+            save_cached_analysis(image_hash, result)
+            return result
         except json.JSONDecodeError as e:
             last_error = e
             continue  # une reformulation de la même image peut aider
