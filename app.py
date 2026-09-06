@@ -26,6 +26,44 @@ from PIL import Image
 
 st.set_page_config(page_title="Analyseur de repas", page_icon="🍽️", layout="centered")
 
+MACRO_COLORS = {
+    "calories": "#E8543E",     # tomate
+    "proteines_g": "#4C7C59",  # basilic
+    "glucides_g": "#E8A33D",   # safran
+    "lipides_g": "#6B5B95",    # prune
+}
+
+CUSTOM_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Work+Sans:wght@400;500;600&display=swap');
+
+html, body, [class*="css"] { font-family: 'Work Sans', sans-serif; color: #1F2A24; }
+h1, h2, h3 { font-family: 'Fraunces', serif !important; font-weight: 700 !important; letter-spacing: -0.01em; }
+.stApp { background-color: #FCFBF7; }
+
+.stButton > button, .stDownloadButton > button {
+    background-color: #E8543E; color: white; border: none; border-radius: 10px;
+    font-weight: 600; padding: 0.5rem 1.25rem; transition: opacity 0.15s ease;
+}
+.stButton > button:hover, .stDownloadButton > button:hover { opacity: 0.85; color: white; }
+
+.stTabs [data-baseweb="tab"] { font-family: 'Fraunces', serif; font-weight: 600; font-size: 1.05rem; }
+.stTabs [aria-selected="true"] { color: #E8543E !important; border-bottom-color: #E8543E !important; }
+
+[data-testid="stSidebar"] { background-color: #F5F1E8; border-right: 1px solid #E7E1D6; }
+
+.macro-card {
+    background: #FFFFFF; border: 1px solid #E7E1D6; border-radius: 12px;
+    padding: 0.85rem 1rem; margin-bottom: 0.6rem;
+}
+.macro-label { font-size: 0.82rem; color: #6B6459; margin-bottom: 0.15rem; }
+.macro-value { font-family: 'Fraunces', serif; font-size: 1.55rem; font-weight: 700; }
+.bar-track { background: #EFEAE0; border-radius: 999px; height: 10px; width: 100%; overflow: hidden; margin-top: 0.35rem; }
+.bar-fill { height: 100%; border-radius: 999px; }
+</style>
+"""
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
 API_KEY = st.secrets.get("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
 
 DB_PATH = "meals.db"
@@ -262,16 +300,28 @@ def analyze_meal(uploaded_file, api_key: str, model: str) -> dict:
 # Aide visuelle : couleur selon proximité de l'objectif
 # ----------------------------------------------------------------------
 
-def macro_bar(label: str, value: float, goal: float, unit: str = "g"):
+def macro_bar(label: str, value: float, goal: float, macro_key: str, unit: str = "g"):
     ratio = min(value / goal, 1.2) if goal else 0
-    if ratio < 0.5:
-        color = "🔵"
-    elif ratio <= 1.05:
-        color = "🟢"
-    else:
-        color = "🟠"
-    st.write(f"{color} **{label}** — {value:.0f} / {goal:.0f} {unit}")
-    st.progress(min(ratio, 1.0))
+    color = MACRO_COLORS.get(macro_key, "#E8543E")
+    st.markdown(
+        f"""<div class="macro-card">
+            <div class="macro-label">{label}</div>
+            <div class="macro-value" style="color:{color}">{value:.0f} <span style="font-size:0.95rem; color:#6B6459; font-family:'Work Sans',sans-serif;">/ {goal:.0f} {unit}</span></div>
+            <div class="bar-track"><div class="bar-fill" style="width:{min(ratio,1.0)*100:.0f}%; background:{color};"></div></div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def macro_row(label: str, value: float, macro_key: str, unit: str = "g"):
+    color = MACRO_COLORS.get(macro_key, "#E8543E")
+    st.markdown(
+        f"""<div class="macro-card">
+            <div class="macro-label">{label}</div>
+            <div class="macro-value" style="color:{color}">{value:.0f} {unit}</div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
 
 
 def display_result(result: dict):
@@ -283,10 +333,10 @@ def display_result(result: dict):
     st.subheader("Résumé du repas")
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Calories", f"{total.get('calories', 0):.0f} kcal")
-    col2.metric("Protéines", f"{total.get('proteines_g', 0):.0f} g")
-    col3.metric("Glucides", f"{total.get('glucides_g', 0):.0f} g")
-    col4.metric("Lipides", f"{total.get('lipides_g', 0):.0f} g")
+    with col1: macro_row("Calories", total.get("calories", 0), "calories", "kcal")
+    with col2: macro_row("Protéines", total.get("proteines_g", 0), "proteines_g")
+    with col3: macro_row("Glucides", total.get("glucides_g", 0), "glucides_g")
+    with col4: macro_row("Lipides", total.get("lipides_g", 0), "lipides_g")
 
     confiance_emoji = {"haute": "🟢", "moyenne": "🟡", "basse": "🔴"}.get(confiance, "🟡")
     st.caption(f"{confiance_emoji} Confiance de l'estimation : {confiance}")
@@ -297,10 +347,10 @@ def display_result(result: dict):
     for aliment in result.get("aliments", []):
         with st.expander(f"{aliment.get('nom', 'Aliment')} — {aliment.get('portion_g', 0):.0f} g"):
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Calories", f"{aliment.get('calories', 0):.0f}")
-            c2.metric("Protéines", f"{aliment.get('proteines_g', 0):.0f} g")
-            c3.metric("Glucides", f"{aliment.get('glucides_g', 0):.0f} g")
-            c4.metric("Lipides", f"{aliment.get('lipides_g', 0):.0f} g")
+            with c1: macro_row("Calories", aliment.get("calories", 0), "calories", "kcal")
+            with c2: macro_row("Protéines", aliment.get("proteines_g", 0), "proteines_g")
+            with c3: macro_row("Glucides", aliment.get("glucides_g", 0), "glucides_g")
+            with c4: macro_row("Lipides", aliment.get("lipides_g", 0), "lipides_g")
 
 
 # ----------------------------------------------------------------------
@@ -326,10 +376,10 @@ MODEL = "gpt-4o-mini" if fast_mode else "gpt-4o"
 st.sidebar.divider()
 st.sidebar.subheader("📅 Aujourd'hui")
 today = get_today_totals()
-macro_bar("Calories", today["calories"], cal_goal, "kcal")
-macro_bar("Protéines", today["proteines_g"], prot_goal)
-macro_bar("Glucides", today["glucides_g"], gluc_goal)
-macro_bar("Lipides", today["lipides_g"], lip_goal)
+macro_bar("Calories", today["calories"], cal_goal, "calories", "kcal")
+macro_bar("Protéines", today["proteines_g"], prot_goal, "proteines_g")
+macro_bar("Glucides", today["glucides_g"], gluc_goal, "glucides_g")
+macro_bar("Lipides", today["lipides_g"], lip_goal, "lipides_g")
 
 
 # ----------------------------------------------------------------------
