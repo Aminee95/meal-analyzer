@@ -19,6 +19,7 @@ from datetime import date, datetime
 import streamlit as st
 from openai import OpenAI
 from PIL import Image
+import pandas as pd
 
 # ----------------------------------------------------------------------
 # Configuration
@@ -221,6 +222,19 @@ def get_meals(limit: int = 200):
     return [dict(r) for r in rows]
 
 
+def get_daily_aggregates(days: int = 30) -> list[dict]:
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT substr(timestamp, 1, 10) as day,
+                      SUM(calories) as calories, SUM(proteines_g) as proteines_g,
+                      SUM(glucides_g) as glucides_g, SUM(lipides_g) as lipides_g
+               FROM meals GROUP BY day ORDER BY day DESC LIMIT ?""",
+            (days,),
+        ).fetchall()
+    return [dict(r) for r in rows][::-1]  # ordre chronologique croissant
+
+
 def get_today_totals() -> dict:
     today_str = date.today().isoformat()
     with get_connection() as conn:
@@ -366,6 +380,17 @@ def macro_row(label: str, value: float, macro_key: str, unit: str = "g"):
     )
 
 
+def empty_state(icon: str, title: str, subtitle: str):
+    st.markdown(
+        f"""<div class="macro-card" style="text-align:center; padding:2.2rem 1.5rem; border-style:dashed;">
+            <div style="font-size:2rem; margin-bottom:0.4rem;">{icon}</div>
+            <div style="font-family:'Fraunces',serif; font-weight:600; font-size:1.1rem; color:#1F2A24;">{title}</div>
+            <div style="color:#6B6459; font-size:0.9rem; margin-top:0.3rem;">{subtitle}</div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+
 def display_result(result: dict):
     total = result.get("total", {})
     confiance = result.get("confiance", "moyenne")
@@ -404,6 +429,38 @@ def display_result(result: dict):
 # Barre latérale — objectifs + réglages
 # ----------------------------------------------------------------------
 
+st.sidebar.header("🧮 Calculer mes objectifs")
+with st.sidebar.expander("Estimer automatiquement", expanded=False):
+    sexe = st.selectbox("Sexe", ["Femme", "Homme"])
+    age = st.number_input("Âge", 14, 100, 30)
+    poids = st.number_input("Poids (kg)", 35, 200, 70)
+    taille = st.number_input("Taille (cm)", 130, 220, 170)
+    activite = st.selectbox(
+        "Niveau d'activité",
+        ["Sédentaire", "Légèrement actif", "Actif", "Très actif"],
+    )
+    objectif_poids = st.selectbox("Objectif", ["Maintien", "Perte de poids", "Prise de masse"])
+
+    if st.button("Calculer et appliquer"):
+        bmr = (10 * poids + 6.25 * taille - 5 * age + 5) if sexe == "Homme" else (10 * poids + 6.25 * taille - 5 * age - 161)
+        activity_factor = {"Sédentaire": 1.2, "Légèrement actif": 1.375, "Actif": 1.55, "Très actif": 1.725}[activite]
+        tdee = bmr * activity_factor
+        adjustment = {"Maintien": 0, "Perte de poids": -450, "Prise de masse": 300}[objectif_poids]
+        calc_calories = max(1200, tdee + adjustment)
+
+        calc_prot = poids * 2.0
+        calc_lip = poids * 0.9
+        calc_gluc = max(0, (calc_calories - (calc_prot * 4 + calc_lip * 9)) / 4)
+
+        for key, val in [
+            ("goal_cal", round(calc_calories)), ("goal_prot", round(calc_prot)),
+            ("goal_gluc", round(calc_gluc)), ("goal_lip", round(calc_lip)),
+        ]:
+            set_setting(key, str(val))
+        st.success(f"Objectifs appliqués : {calc_calories:.0f} kcal/jour")
+        st.rerun()
+
+st.sidebar.divider()
 st.sidebar.header("🎯 Objectifs journaliers")
 cal_goal = st.sidebar.number_input("Calories (kcal)", 500, 6000, int(get_setting("goal_cal", "2000")), 50)
 prot_goal = st.sidebar.number_input("Protéines (g)", 20, 400, int(get_setting("goal_prot", "100")), 5)
@@ -438,7 +495,7 @@ st.markdown(HERO_HTML, unsafe_allow_html=True)
 if not API_KEY:
     st.warning("Aucune clé API trouvée. Ajoute OPENAI_API_KEY dans les secrets Streamlit.")
 
-tab_analyser, tab_historique = st.tabs(["📸 Analyser", "📊 Historique"])
+tab_analyser, tab_historique, tab_tendances = st.tabs(["📸 Analyser", "📊 Historique", "📈 Tendances"])
 
 with tab_analyser:
     meal_type = st.selectbox("Type de repas", MEAL_TYPES)
@@ -469,7 +526,7 @@ with tab_analyser:
             st.session_state["last_result"] = result
             st.rerun()
     else:
-        st.info("Prends ou choisis une photo pour commencer.")
+        empty_state("📷", "Prêt quand tu l'es", "Prends ou choisis une photo de ton repas pour commencer.")
 
     if "last_result" in st.session_state:
         display_result(st.session_state["last_result"])
@@ -486,7 +543,7 @@ with tab_historique:
     meals = get_meals()
 
     if not meals:
-        st.info("Aucun repas analysé pour le moment.")
+        empty_state("📊", "Ton historique est vide", "Chaque repas analysé apparaîtra ici avec son détail complet.")
     else:
         chart_data = {}
         for m in meals:
@@ -518,3 +575,51 @@ with tab_historique:
                 if st.button("🗑️ Supprimer cette entrée", key=f"del_{m['id']}"):
                     delete_meal(m["id"])
                     st.rerun()
+
+with tab_tendances:
+    daily = get_daily_aggregates(days=30)
+
+    if len(daily) < 2:
+        st.markdown(
+            """<div class="macro-card" style="text-align:center; padding:2rem 1rem;">
+                <div class="macro-label" style="font-size:1rem;">Pas encore assez de données</div>
+                <div style="color:#6B6459; font-size:0.9rem; margin-top:0.3rem;">
+                    Analyse quelques repas sur plusieurs jours pour voir tes tendances apparaître ici.
+                </div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+    else:
+        this_week = daily[-7:]
+        prev_week = daily[-14:-7] if len(daily) >= 14 else []
+
+        def avg(rows, key):
+            return sum(r[key] or 0 for r in rows) / len(rows) if rows else 0
+
+        st.subheader("Moyenne des 7 derniers jours")
+        col1, col2, col3, col4 = st.columns(4)
+        for col, key, label, unit in [
+            (col1, "calories", "Calories", "kcal"), (col2, "proteines_g", "Protéines", "g"),
+            (col3, "glucides_g", "Glucides", "g"), (col4, "lipides_g", "Lipides", "g"),
+        ]:
+            current_avg = avg(this_week, key)
+            with col:
+                macro_row(label, current_avg, key, unit)
+                if prev_week:
+                    prev_avg = avg(prev_week, key)
+                    delta = current_avg - prev_avg
+                    arrow = "↑" if delta > 0 else ("↓" if delta < 0 else "→")
+                    st.caption(f"{arrow} {abs(delta):.0f} {unit} vs semaine précédente")
+
+        st.divider()
+        st.subheader("Calories — 30 derniers jours")
+        cal_by_day = {d["day"]: d["calories"] or 0 for d in daily}
+        st.bar_chart(cal_by_day, color="#E8543E")
+
+        st.subheader("Répartition des macros dans le temps")
+        macro_chart_data = {
+            d["day"]: [d["proteines_g"] or 0, d["glucides_g"] or 0, d["lipides_g"] or 0] for d in daily
+        }
+        df = pd.DataFrame(macro_chart_data.values(), index=macro_chart_data.keys(),
+                           columns=["Protéines", "Glucides", "Lipides"])
+        st.line_chart(df, color=["#4C7C59", "#E8A33D", "#6B5B95"])
