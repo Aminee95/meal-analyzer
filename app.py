@@ -25,69 +25,92 @@ import pandas as pd
 # Configuration
 # ----------------------------------------------------------------------
 
-st.set_page_config(page_title="Analyseur de repas", page_icon="🍽️", layout="centered")
+st.set_page_config(page_title="Assiette", page_icon="🍽️", layout="centered")
 
-MACRO_COLORS = {
-    "calories": "#E8543E",     # tomate
-    "proteines_g": "#4C7C59",  # basilic
-    "glucides_g": "#E8A33D",   # safran
-    "lipides_g": "#6B5B95",    # prune
-}
+dark_mode = st.sidebar.toggle("🌙 Mode sombre", key="dark_mode")
+st.sidebar.divider()
 
-CUSTOM_CSS = """
+if dark_mode:
+    THEME = {
+        "bg": "#18160F", "sidebar_bg": "#201C15", "card_bg": "#241F17", "border": "#3A3226",
+        "ink": "#F3EFE4", "muted": "#A79E8C", "track": "#332C21",
+    }
+    MACRO_COLORS = {
+        "calories": "#FF7A61", "proteines_g": "#6FA37D", "glucides_g": "#F0B857", "lipides_g": "#9686C4",
+    }
+else:
+    THEME = {
+        "bg": "#FCFBF7", "sidebar_bg": "#F5F1E8", "card_bg": "#FFFFFF", "border": "#E7E1D6",
+        "ink": "#1F2A24", "muted": "#6B6459", "track": "#EFEAE0",
+    }
+    MACRO_COLORS = {
+        "calories": "#E8543E", "proteines_g": "#4C7C59", "glucides_g": "#E8A33D", "lipides_g": "#6B5B95",
+    }
+
+CUSTOM_CSS = f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Work+Sans:wght@400;500;600&display=swap');
 
-html, body, [class*="css"] { font-family: 'Work Sans', sans-serif; color: #1F2A24; }
-h1, h2, h3 { font-family: 'Fraunces', serif !important; font-weight: 700 !important; letter-spacing: -0.01em; }
-.stApp { background-color: #FCFBF7; }
+html, body, [class*="css"] {{ font-family: 'Work Sans', sans-serif; color: {THEME["ink"]}; }}
+h1, h2, h3 {{ font-family: 'Fraunces', serif !important; font-weight: 700 !important; letter-spacing: -0.01em; color: {THEME["ink"]}; }}
+p, span, label, div {{ color: {THEME["ink"]}; }}
+.stApp {{ background-color: {THEME["bg"]}; }}
 
-.stButton > button, .stDownloadButton > button {
-    background-color: #E8543E; color: white; border: none; border-radius: 10px;
+.stButton > button, .stDownloadButton > button {{
+    background-color: {MACRO_COLORS["calories"]}; color: white; border: none; border-radius: 10px;
     font-weight: 600; padding: 0.5rem 1.25rem; transition: opacity 0.15s ease;
-}
-.stButton > button:hover, .stDownloadButton > button:hover { opacity: 0.85; color: white; }
+}}
+.stButton > button:hover, .stDownloadButton > button:hover {{ opacity: 0.85; color: white; }}
 
-.stTabs [data-baseweb="tab"] { font-family: 'Fraunces', serif; font-weight: 600; font-size: 1.05rem; }
-.stTabs [aria-selected="true"] { color: #E8543E !important; border-bottom-color: #E8543E !important; }
+.stTabs [data-baseweb="tab"] {{ font-family: 'Fraunces', serif; font-weight: 600; font-size: 1.05rem; }}
+.stTabs [aria-selected="true"] {{ color: {MACRO_COLORS["calories"]} !important; border-bottom-color: {MACRO_COLORS["calories"]} !important; }}
 
-[data-testid="stSidebar"] { background-color: #F5F1E8; border-right: 1px solid #E7E1D6; }
+[data-testid="stSidebar"] {{ background-color: {THEME["sidebar_bg"]}; border-right: 1px solid {THEME["border"]}; }}
+[data-testid="stSidebar"] * {{ color: {THEME["ink"]}; }}
 
-.macro-card {
-    background: #FFFFFF; border: 1px solid #E7E1D6; border-radius: 12px;
+.macro-card {{
+    background: {THEME["card_bg"]}; border: 1px solid {THEME["border"]}; border-radius: 12px;
     padding: 0.85rem 1rem; margin-bottom: 0.6rem;
-    box-shadow: 0 2px 8px rgba(31, 42, 36, 0.05);
-}
-.macro-label { font-size: 0.82rem; color: #6B6459; margin-bottom: 0.15rem; }
-.macro-value { font-family: 'Fraunces', serif; font-size: 1.55rem; font-weight: 700; }
-.bar-track { background: #EFEAE0; border-radius: 999px; height: 10px; width: 100%; overflow: hidden; margin-top: 0.35rem; }
-.bar-fill { height: 100%; border-radius: 999px; }
+    box-shadow: 0 2px 8px rgba(0, 0, 0, {0.25 if dark_mode else 0.05});
+}}
+.macro-label {{ font-size: 0.82rem; color: {THEME["muted"]}; margin-bottom: 0.15rem; }}
+.macro-value {{ font-family: 'Fraunces', serif; font-size: 1.55rem; font-weight: 700; }}
+.bar-track {{ background: {THEME["track"]}; border-radius: 999px; height: 10px; width: 100%; overflow: hidden; margin-top: 0.35rem; }}
+.bar-fill {{ height: 100%; border-radius: 999px; }}
 
-.hero { display: flex; align-items: center; gap: 0.85rem; margin-bottom: 0.2rem; }
-.hero-mark {
-    width: 46px; height: 46px; border-radius: 13px; background: #E8543E;
+.hero {{ display: flex; align-items: center; gap: 0.85rem; margin-bottom: 0.2rem; }}
+.hero-mark {{
+    width: 46px; height: 46px; border-radius: 13px; background: {MACRO_COLORS["calories"]};
     display: flex; align-items: center; justify-content: center; flex-shrink: 0;
     box-shadow: 0 4px 14px rgba(232, 84, 62, 0.28);
-}
-.hero-title { font-family: 'Fraunces', serif; font-weight: 700; font-size: 2rem; line-height: 1.1; margin: 0; color: #1F2A24; }
-.hero-tagline { color: #6B6459; font-size: 0.98rem; margin-top: 0.15rem; }
+}}
+.hero-title {{ font-family: 'Fraunces', serif; font-weight: 700; font-size: 2rem; line-height: 1.1; margin: 0; color: {THEME["ink"]}; }}
+.hero-tagline {{ color: {THEME["muted"]}; font-size: 0.98rem; margin-top: 0.15rem; }}
 
-.badge {
+.badge {{
     display: inline-flex; align-items: center; gap: 0.35rem; border-radius: 999px;
     padding: 0.3rem 0.85rem; font-size: 0.82rem; font-weight: 600;
-}
+}}
 
-[data-testid="stExpander"] {
-    border: 1px solid #E7E1D6 !important; border-radius: 12px !important;
-    box-shadow: 0 2px 8px rgba(31, 42, 36, 0.04);
-}
-[data-testid="stExpander"] summary {
-    font-family: 'Fraunces', serif; font-weight: 600;
-}
+[data-testid="stExpander"] {{
+    border: 1px solid {THEME["border"]} !important; border-radius: 12px !important;
+    background: {THEME["card_bg"]};
+    box-shadow: 0 2px 8px rgba(0, 0, 0, {0.2 if dark_mode else 0.04});
+}}
+[data-testid="stExpander"] summary {{ font-family: 'Fraunces', serif; font-weight: 600; }}
 
-.stAlert, [data-testid="stNotification"] {
-    border-radius: 12px !important;
-}
+.stAlert, [data-testid="stNotification"] {{ border-radius: 12px !important; }}
+
+/* Ajustements mobile */
+@media (max-width: 480px) {{
+    .hero-mark {{ width: 38px; height: 38px; border-radius: 11px; }}
+    .hero-title {{ font-size: 1.55rem; }}
+    .hero-tagline {{ font-size: 0.85rem; }}
+    .macro-card {{ padding: 0.65rem 0.75rem; }}
+    .macro-value {{ font-size: 1.25rem; }}
+    .stTabs [data-baseweb="tab"] {{ font-size: 0.9rem; padding: 0.4rem 0.5rem; }}
+    div[data-testid="column"] {{ min-width: calc(50% - 0.5rem) !important; }}
+}}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
