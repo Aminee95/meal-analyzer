@@ -131,6 +131,8 @@ HERO_HTML = """
 """
 
 API_KEY = st.secrets.get("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
+APP_PASSWORD = st.secrets.get("APP_PASSWORD", "")
+DAILY_API_LIMIT = int(st.secrets.get("DAILY_API_LIMIT", 60))
 
 DB_PATH = "meals.db"
 MAX_IMAGE_DIMENSION = 800
@@ -198,6 +200,12 @@ def init_db():
         )
         conn.execute(
             "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS api_usage (
+                day TEXT PRIMARY KEY,
+                count INTEGER NOT NULL DEFAULT 0
+            )"""
         )
         conn.execute(
             """CREATE TABLE IF NOT EXISTS analysis_cache (
@@ -290,6 +298,34 @@ def set_setting(key: str, value: str):
         )
 
 
+class QuotaExceededError(Exception):
+    """Levée quand le quota journalier d'appels API est atteint."""
+
+
+def check_and_increment_quota(daily_limit: int):
+    """Vérifie le quota global du jour et l'incrémente. Lève QuotaExceededError si dépassé."""
+    today_str = date.today().isoformat()
+    with get_connection() as conn:
+        row = conn.execute("SELECT count FROM api_usage WHERE day = ?", (today_str,)).fetchone()
+        current = row[0] if row else 0
+        if current >= daily_limit:
+            raise QuotaExceededError(
+                f"Quota journalier atteint ({daily_limit} analyses). Réessaie demain."
+            )
+        conn.execute(
+            "INSERT INTO api_usage (day, count) VALUES (?, 1) "
+            "ON CONFLICT(day) DO UPDATE SET count = count + 1",
+            (today_str,),
+        )
+
+
+def get_quota_usage() -> int:
+    today_str = date.today().isoformat()
+    with get_connection() as conn:
+        row = conn.execute("SELECT count FROM api_usage WHERE day = ?", (today_str,)).fetchone()
+    return row[0] if row else 0
+
+
 def get_cached_analysis(image_hash: str) -> dict | None:
     with get_connection() as conn:
         row = conn.execute(
@@ -332,6 +368,8 @@ def analyze_meal(uploaded_file, api_key: str, model: str) -> dict:
     cached = get_cached_analysis(image_hash)
     if cached is not None:
         return cached
+
+    check_and_increment_quota(DAILY_API_LIMIT)  # lève QuotaExceededError si dépassé
 
     client = OpenAI(api_key=api_key)
     data_url = f"data:{media_type};base64,{b64_image}"
@@ -508,12 +546,26 @@ macro_bar("Protéines", today["proteines_g"], prot_goal, "proteines_g")
 macro_bar("Glucides", today["glucides_g"], gluc_goal, "glucides_g")
 macro_bar("Lipides", today["lipides_g"], lip_goal, "lipides_g")
 
+st.sidebar.divider()
+usage = get_quota_usage()
+st.sidebar.caption(f"🛡️ Quota API : {usage} / {DAILY_API_LIMIT} analyses aujourd'hui")
+
 
 # ----------------------------------------------------------------------
 # Contenu principal
 # ----------------------------------------------------------------------
 
 st.markdown(HERO_HTML, unsafe_allow_html=True)
+
+if APP_PASSWORD and not st.session_state.get("authenticated"):
+    st.text_input("Code d'accès", type="password", key="password_input")
+    if st.button("Entrer"):
+        if st.session_state["password_input"] == APP_PASSWORD:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Code incorrect.")
+    st.stop()
 
 if not API_KEY:
     st.warning("Aucune clé API trouvée. Ajoute OPENAI_API_KEY dans les secrets Streamlit.")
@@ -541,6 +593,9 @@ with tab_analyser:
             with st.spinner(f"Analyse en cours ({MODEL})..."):
                 try:
                     result = analyze_meal(uploaded_file, API_KEY, MODEL)
+                except QuotaExceededError as e:
+                    st.error(f"🛑 {e}")
+                    st.stop()
                 except RuntimeError as e:
                     st.error(f"L'analyse a échoué après plusieurs tentatives : {e}")
                     st.stop()

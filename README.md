@@ -44,9 +44,20 @@ pip install -r requirements.txt
 
 # Crée .streamlit/secrets.toml avec :
 # OPENAI_API_KEY = "ta-clé-ici"
+# APP_PASSWORD = "un-code-au-choix"      (optionnel — protège l'accès à l'app)
+# DAILY_API_LIMIT = 60                    (optionnel — plafond d'analyses/jour, défaut 60)
 
 streamlit run app.py
 ```
+
+## 🔒 Sécurité si tu partages le lien
+
+Deux protections activables via les secrets Streamlit :
+
+- **`APP_PASSWORD`** — si défini, un code d'accès est demandé avant d'utiliser l'app. Partage-le uniquement aux personnes de confiance.
+- **`DAILY_API_LIMIT`** — plafond global du nombre d'analyses IA par jour (tous utilisateurs confondus), pour éviter une facture surprise même en cas de partage large. Le compteur est visible en bas de la barre latérale.
+
+En complément, pense à fixer une **limite de dépense mensuelle** directement sur [platform.openai.com → Billing](https://platform.openai.com/settings/organization/limits) — c'est le filet de sécurité ultime, indépendant du code.
 
 ## 🌍 Déploiement
 
