@@ -413,6 +413,31 @@ def analyze_meal(uploaded_file, api_key: str, model: str) -> dict:
     raise RuntimeError(f"Échec après {MAX_RETRIES + 1} tentatives : {last_error}")
 
 
+def suggest_meal(remaining: dict, api_key: str) -> str:
+    """Propose 2 idées de repas qui tiennent dans les macros restantes de la journée."""
+    check_and_increment_quota(DAILY_API_LIMIT)
+
+    client = OpenAI(api_key=api_key)
+    prompt = f"""Il me reste aujourd'hui environ {remaining['calories']:.0f} kcal,
+{remaining['proteines_g']:.0f} g de protéines, {remaining['glucides_g']:.0f} g de glucides
+et {remaining['lipides_g']:.0f} g de lipides avant d'atteindre mes objectifs journaliers.
+
+Propose-moi 2 idées de repas simples et réalistes (ingrédients courants) qui
+respectent au mieux ces valeurs restantes, sans trop les dépasser. Format concis :
+pour chaque idée, un nom de plat en gras suivi d'une ligne d'ingrédients principaux
+et d'une estimation calories/macros. Réponds en français, sans introduction ni
+conclusion, juste les 2 propositions."""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        max_tokens=500,
+        temperature=0.4,
+        timeout=30,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.choices[0].message.content.strip()
+
+
 # ----------------------------------------------------------------------
 # Aide visuelle : couleur selon proximité de l'objectif
 # ----------------------------------------------------------------------
@@ -573,6 +598,32 @@ if not API_KEY:
 tab_analyser, tab_historique, tab_tendances = st.tabs(["📸 Analyser", "📊 Historique", "📈 Tendances"])
 
 with tab_analyser:
+    with st.expander("💡 Que manger avec ce qu'il me reste aujourd'hui ?"):
+        remaining = {
+            "calories": max(cal_goal - today["calories"], 0),
+            "proteines_g": max(prot_goal - today["proteines_g"], 0),
+            "glucides_g": max(gluc_goal - today["glucides_g"], 0),
+            "lipides_g": max(lip_goal - today["lipides_g"], 0),
+        }
+        st.caption(
+            f"Il te reste ~{remaining['calories']:.0f} kcal · "
+            f"{remaining['proteines_g']:.0f}g protéines · "
+            f"{remaining['glucides_g']:.0f}g glucides · "
+            f"{remaining['lipides_g']:.0f}g lipides"
+        )
+        if st.button("Me suggérer un repas", disabled=not API_KEY):
+            with st.spinner("Recherche d'idées..."):
+                try:
+                    suggestion = suggest_meal(remaining, API_KEY)
+                    st.session_state["last_suggestion"] = suggestion
+                except QuotaExceededError as e:
+                    st.error(f"🛑 {e}")
+                except Exception as e:
+                    st.error(f"Impossible de générer une suggestion : {e}")
+
+        if "last_suggestion" in st.session_state:
+            st.markdown(st.session_state["last_suggestion"])
+
     meal_type = st.selectbox("Type de repas", MEAL_TYPES)
 
     source = st.radio("Photo", ["📷 Prendre une photo", "🖼️ Depuis la galerie"], horizontal=True)
